@@ -7,7 +7,7 @@ on:
 env:
   REGISTRY: ghcr.io
   # Se construye como ghcr.io/TU_USUARIO/digital-signage/backend, etc.
-  IMAGE_BASE: ghcr.io/${{ github.repository }}
+  IMAGE_BASE: ghcr.io/desarrolladormicelu/digital-signage
 
 jobs:
   # ─────────────────────────────────────────
