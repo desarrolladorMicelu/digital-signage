@@ -1,0 +1,108 @@
+name: Build & Deploy to Azure
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  # Se construye como ghcr.io/TU_USUARIO/digital-signage/backend, etc.
+  IMAGE_BASE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1: Construir y publicar imágenes Docker
+  # ─────────────────────────────────────────
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # necesario para publicar en GHCR
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Login a GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx (builds más rápidos)
+        uses: docker/setup-buildx-action@v3
+
+      # ── Backend ──
+      - name: Build & Push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.IMAGE_BASE }}/backend:latest
+            ${{ env.IMAGE_BASE }}/backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Frontend (Dashboard) ──
+      - name: Build & Push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.IMAGE_BASE }}/frontend:latest
+            ${{ env.IMAGE_BASE }}/frontend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Player ──
+      - name: Build & Push player
+        uses: docker/build-push-action@v5
+        with:
+          context: ./player
+          push: true
+          tags: |
+            ${{ env.IMAGE_BASE }}/player:latest
+            ${{ env.IMAGE_BASE }}/player:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────
+  # JOB 2: Deploy en la VM de Azure vía SSH
+  # ─────────────────────────────────────────
+  deploy:
+    name: Deploy to Azure VM
+    runs-on: ubuntu-latest
+    needs: build-and-push   # solo después de que las imágenes estén listas
+
+    steps:
+      - name: SSH Deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.AZURE_VM_HOST }}
+          username: ${{ secrets.AZURE_VM_USER }}
+          key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/digital-signage
+
+            # Login a GHCR desde el servidor
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+              -u "${{ github.actor }}" --password-stdin
+
+            # Actualizar .env.production con el SHA del commit actual
+            sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${{ github.sha }}/" .env.production
+
+            # Bajar nuevas imágenes
+            docker compose --env-file .env.production pull
+
+            # Reiniciar contenedores con zero-downtime básico
+            docker compose --env-file .env.production up -d --remove-orphans
+
+            # Limpiar imágenes antiguas (libera espacio en disco)
+            docker image prune -f
+
+            echo "Deploy completado: ${{ github.sha }}"

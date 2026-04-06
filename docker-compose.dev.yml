@@ -1,0 +1,39 @@
+# docker-compose.dev.yml  →  DESARROLLO LOCAL
+# Usar con:  docker compose -f docker-compose.dev.yml up --build
+
+services:
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "8083:8083"
+      - "1883:1883"
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/data:/app/data
+      - ./backend/src:/app/src          # hot-reload opcional
+    environment:
+      PORT: "3000"
+      MQTT_WS_PORT: "8083"
+      MQTT_TCP_PORT: "1883"
+      DB_PATH: /app/data/database.sqlite
+      UPLOAD_DIR: /app/uploads
+      JWT_SECRET: dev-secret-solo-local
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+  player:
+    build: ./player
+    restart: unless-stopped
+    ports:
+      - "5174:80"
+    depends_on:
+      - backend

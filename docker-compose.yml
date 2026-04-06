@@ -1,0 +1,50 @@
+# docker-compose.yml  →  PRODUCCIÓN (Azure)
+# Usar con:  docker compose up -d
+# Las imágenes se definen en .env.production (ver .env.production.example)
+
+services:
+
+  backend:
+    image: ${REGISTRY}/backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"   # API REST
+      - "8083:8083"   # MQTT WebSocket (los players se conectan aquí)
+      - "1883:1883"   # MQTT TCP (opcional, para clientes nativos)
+    volumes:
+      - uploads:/app/uploads     # imágenes subidas (persistente)
+      - db:/app/data             # base de datos SQLite (persistente)
+    environment:
+      PORT: "3000"
+      MQTT_WS_PORT: "8083"
+      MQTT_TCP_PORT: "1883"
+      DB_PATH: /app/data/database.sqlite
+      UPLOAD_DIR: /app/uploads
+      JWT_SECRET: ${JWT_SECRET}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    image: ${REGISTRY}/frontend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "80:80"       # Dashboard admin
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  player:
+    image: ${REGISTRY}/player:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "5174:80"     # Player web (WebView del MXQ apunta aquí)
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  uploads:
+  db:

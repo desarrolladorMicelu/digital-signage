@@ -1,0 +1,35 @@
+# Dependencias
+node_modules/
+*/node_modules/
+.cursor/
+# Builds
+dist/
+*/dist/
+
+# Variables de entorno con secretos
+.env
+backend/.env
+.env.production
+.env.production.example
+
+# Base de datos y uploads locales
+backend/database.sqlite
+backend/data/
+backend/uploads/
+
+# Android build artifacts
+android/.gradle/
+android/app/build/
+android/local.properties
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.iml
