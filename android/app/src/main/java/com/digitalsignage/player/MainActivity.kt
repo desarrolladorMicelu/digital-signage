@@ -1,13 +1,16 @@
 package com.digitalsignage.player
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.graphics.Color
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.InputType
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -21,15 +24,18 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.EditText
 import android.widget.TextView
 
 class MainActivity : Activity() {
 
     // ===== CONFIGURAR ESTOS VALORES =====
-    private val SERVER_URL = "http://192.168.0.11:5174/?device=screen-001"
+    private val PLAYER_BASE_URL = "http://20.81.42.176:5174"
     // Cada cuántos segundos reintenta si no hay red
     private val RETRY_INTERVAL_MS = 5000L
     // =====================================
+    private val PREFS_NAME = "digital_signage_prefs"
+    private val PREF_DEVICE_ID = "device_id"
 
     private lateinit var webView: WebView
     private lateinit var errorLayout: LinearLayout
@@ -61,7 +67,7 @@ class MainActivity : Activity() {
 
         applyImmersive()
         setupViews()
-        loadPlayer()
+        ensureDeviceConfiguredAndLoad()
     }
 
     private fun setupViews() {
@@ -183,11 +189,76 @@ class MainActivity : Activity() {
     }
 
     private fun loadPlayer() {
+        val serverUrl = buildServerUrl() ?: return
         hasError = false
         isLoading = true
         handler.removeCallbacks(retryRunnable)
-        webView.loadUrl(SERVER_URL)
+        webView.loadUrl(serverUrl)
         showPlayer()
+    }
+
+    private fun ensureDeviceConfiguredAndLoad() {
+        val savedDeviceId = getConfiguredDeviceId()
+        if (savedDeviceId.isNullOrBlank()) {
+            showDeviceConfigDialog()
+        } else {
+            loadPlayer()
+        }
+    }
+
+    private fun showDeviceConfigDialog(prefill: String = "") {
+        val input = EditText(this).apply {
+            hint = "Ej: screen-001"
+            setText(prefill)
+            inputType = InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+            setPadding(40, 20, 40, 20)
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Configurar pantalla")
+            .setMessage("Ingresa el device_id asignado en el dashboard")
+            .setView(input)
+            .setCancelable(false)
+            .setPositiveButton("Guardar", null)
+            .create()
+
+        dialog.setOnShowListener {
+            val button = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            button.setOnClickListener {
+                val deviceId = input.text.toString().trim()
+                if (deviceId.isBlank()) {
+                    input.error = "El device_id es obligatorio"
+                    return@setOnClickListener
+                }
+                saveDeviceId(deviceId)
+                dialog.dismiss()
+                loadPlayer()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun buildServerUrl(): String? {
+        val deviceId = getConfiguredDeviceId()
+        if (deviceId.isNullOrBlank()) {
+            showDeviceConfigDialog()
+            return null
+        }
+        return Uri.parse(PLAYER_BASE_URL).buildUpon()
+            .appendQueryParameter("device", deviceId)
+            .build()
+            .toString()
+    }
+
+    private fun getConfiguredDeviceId(): String? {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        return prefs.getString(PREF_DEVICE_ID, null)
+    }
+
+    private fun saveDeviceId(deviceId: String) {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        prefs.edit().putString(PREF_DEVICE_ID, deviceId).apply()
     }
 
     private fun showPlayer() {
@@ -236,6 +307,10 @@ class MainActivity : Activity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_MENU) {
+            showDeviceConfigDialog(getConfiguredDeviceId().orEmpty())
+            return true
+        }
         if (keyCode == KeyEvent.KEYCODE_BACK) return true
         return super.onKeyDown(keyCode, event)
     }

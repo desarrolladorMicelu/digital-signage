@@ -99,9 +99,18 @@ export default function MediaPage() {
             <div key={item.id} className="group bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden hover:shadow-md transition-shadow">
               <div className="aspect-video bg-gray-100 relative overflow-hidden">
                 {item.mime_type?.startsWith('video/') ? (
-                  <div className="w-full h-full flex items-center justify-center bg-gray-800 text-white text-sm px-2 text-center">
-                    Video
-                  </div>
+                  <>
+                    <video
+                      src={item.url}
+                      className="w-full h-full object-cover"
+                      muted
+                      preload="metadata"
+                      playsInline
+                    />
+                    <div className="absolute top-2 left-2 bg-black/60 text-white text-[10px] px-2 py-1 rounded">
+                      VIDEO
+                    </div>
+                  </>
                 ) : (
                   <img src={item.url} alt={item.original_name} className="w-full h-full object-cover" loading="lazy" />
                 )}

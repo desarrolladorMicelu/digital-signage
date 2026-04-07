@@ -5,6 +5,13 @@ import toast from 'react-hot-toast';
 
 const log = (...args) => console.log('[ScreenDetail]', ...args);
 
+function isVideoMedia(item) {
+  const mime = String(item?.mime_type || '').toLowerCase();
+  if (mime.startsWith('video/')) return true;
+  const url = String(item?.url || '').toLowerCase();
+  return /\.(mp4|webm|ogg|mov|m4v)(\?|$)/.test(url);
+}
+
 /** Con alias explícito `as: 'ScreenMedia'`, Sequelize devuelve exactamente esa clave. */
 function getScreenMediaRows(data) {
   if (!data || typeof data !== 'object') return [];
@@ -24,6 +31,7 @@ export default function ScreenDetail() {
   const [allMedia, setAllMedia] = useState([]);
   const [playlist, setPlaylist] = useState([]);
   const [showMediaPicker, setShowMediaPicker] = useState(false);
+  const [selectedMediaIds, setSelectedMediaIds] = useState([]);
   const [loading, setLoading] = useState(true);
   /** Evita que el polling borre la playlist antes de guardar */
   const playlistDirtyRef = useRef(false);
@@ -63,6 +71,7 @@ export default function ScreenDetail() {
             media_id: sm.Media.id,
             url: sm.Media.url,
             original_name: sm.Media.original_name,
+            mime_type: sm.Media.mime_type,
             duration: sm.duration,
             position: sm.position,
           }));
@@ -86,29 +95,40 @@ export default function ScreenDetail() {
     } catch {}
   }
 
-  function addToPlaylist(media) {
-    if (media == null || media.id == null) {
-      console.error('[ScreenDetail] addToPlaylist: media inválido', media);
-      toast.error('No se pudo agregar: datos de media incompletos');
+  function toggleMediaSelection(mediaId) {
+    setSelectedMediaIds((prev) => (
+      prev.includes(mediaId) ? prev.filter((id) => id !== mediaId) : [...prev, mediaId]
+    ));
+  }
+
+  function addSelectedToPlaylist() {
+    if (selectedMediaIds.length === 0) {
+      toast.error('Selecciona al menos un archivo');
       return;
     }
-    if (playlist.find((p) => p.media_id === media.id)) {
-      toast.error('Ya está en la playlist');
+
+    const existing = new Set(playlist.map((p) => p.media_id));
+    const toAdd = allMedia.filter((m) => selectedMediaIds.includes(m.id) && !existing.has(m.id));
+
+    if (toAdd.length === 0) {
+      toast.error('Los elementos seleccionados ya están en la playlist');
       return;
     }
+
     markPlaylistDirty();
-    setPlaylist([
-      ...playlist,
-      {
-        media_id: media.id,
-        url: media.url,
-        original_name: media.original_name,
-        duration: 10,
-        position: playlist.length,
-      },
-    ]);
+    const basePosition = playlist.length;
+    const appended = toAdd.map((media, idx) => ({
+      media_id: media.id,
+      url: media.url,
+      original_name: media.original_name,
+      mime_type: media.mime_type,
+      duration: 10,
+      position: basePosition + idx,
+    }));
+    setPlaylist([...playlist, ...appended]);
+    setSelectedMediaIds([]);
     setShowMediaPicker(false);
-    log('Item agregado a playlist local', { media_id: media.id });
+    toast.success(`${toAdd.length} item(s) agregado(s)`);
   }
 
   function removeFromPlaylist(index) {
@@ -119,7 +139,7 @@ export default function ScreenDetail() {
   function updateDuration(index, duration) {
     markPlaylistDirty();
     const updated = [...playlist];
-    updated[index] = { ...updated[index], duration: parseInt(duration, 10) || 10 };
+    updated[index] = { ...updated[index], duration: Number.parseInt(duration, 10) || 10 };
     setPlaylist(updated);
   }
 
@@ -281,20 +301,44 @@ export default function ScreenDetail() {
                       <button onClick={() => moveItem(index, 1)} disabled={index === playlist.length - 1} className="text-gray-400 hover:text-gray-600 disabled:opacity-30 text-xs">Abajo</button>
                     </div>
                     <span className="text-xs font-mono text-gray-400 w-6 text-center">{index + 1}</span>
-                    <div className="w-16 h-10 rounded overflow-hidden bg-gray-100 flex-shrink-0">
-                      <img src={item.url} alt="" className="w-full h-full object-cover" />
+                    <div className="w-16 h-10 rounded overflow-hidden bg-gray-100 flex-shrink-0 relative">
+                      {isVideoMedia(item) ? (
+                        <>
+                          <video
+                            src={item.url}
+                            className="w-full h-full object-cover"
+                            muted
+                            preload="metadata"
+                            playsInline
+                          />
+                          <div className="absolute top-0.5 left-0.5 bg-black/60 text-white text-[9px] px-1 py-0.5 rounded">
+                            VIDEO
+                          </div>
+                        </>
+                      ) : (
+                        <img src={item.url} alt="" className="w-full h-full object-cover" />
+                      )}
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-700 truncate">{item.original_name}</p>
+                      {isVideoMedia(item) && (
+                        <p className="text-xs text-indigo-600">Duración automática (según video)</p>
+                      )}
                     </div>
                     <div className="flex items-center gap-1">
-                      <input
-                        type="number" min="1" max="300"
-                        value={item.duration}
-                        onChange={(e) => updateDuration(index, e.target.value)}
-                        className="w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-                      />
-                      <span className="text-xs text-gray-500">seg</span>
+                      {isVideoMedia(item) ? (
+                        <span className="text-xs text-gray-500 px-2 py-1 bg-gray-100 rounded">Auto</span>
+                      ) : (
+                        <>
+                          <input
+                            type="number" min="1" max="300"
+                            value={item.duration}
+                            onChange={(e) => updateDuration(index, e.target.value)}
+                            className="w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
+                          />
+                          <span className="text-xs text-gray-500">seg</span>
+                        </>
+                      )}
                     </div>
                     <button onClick={() => removeFromPlaylist(index)} className="text-red-400 hover:text-red-600 p-1" title="Quitar">
                       Quitar
@@ -312,7 +356,23 @@ export default function ScreenDetail() {
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl p-6 max-h-[80vh] flex flex-col">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-gray-800">Seleccionar Media</h3>
-              <button onClick={() => setShowMediaPicker(false)} className="text-gray-400 hover:text-gray-600 text-sm font-medium">Cerrar</button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={addSelectedToPlaylist}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+                >
+                  Agregar seleccionados ({selectedMediaIds.length})
+                </button>
+                <button
+                  onClick={() => {
+                    setSelectedMediaIds([]);
+                    setShowMediaPicker(false);
+                  }}
+                  className="text-gray-400 hover:text-gray-600 text-sm font-medium"
+                >
+                  Cerrar
+                </button>
+              </div>
             </div>
             <div className="flex-1 overflow-auto">
               {allMedia.length === 0 ? (
@@ -324,23 +384,45 @@ export default function ScreenDetail() {
                 <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
                   {allMedia.map((item) => {
                     const inPlaylist = playlist.some((p) => p.media_id === item.id);
+                    const isSelected = selectedMediaIds.includes(item.id);
+                    let cardClass = 'border-gray-200 hover:border-indigo-500 hover:shadow-md cursor-pointer';
+                    if (inPlaylist) {
+                      cardClass = 'border-green-300 opacity-50 cursor-not-allowed';
+                    } else if (isSelected) {
+                      cardClass = 'border-indigo-500 ring-2 ring-indigo-200 cursor-pointer';
+                    }
                     return (
                       <button
                         key={item.id}
-                        onClick={() => addToPlaylist(item)}
+                        onClick={() => toggleMediaSelection(item.id)}
                         disabled={inPlaylist}
-                        className={`rounded-lg overflow-hidden border-2 transition-all text-left ${
-                          inPlaylist
-                            ? 'border-green-300 opacity-50 cursor-not-allowed'
-                            : 'border-gray-200 hover:border-indigo-500 hover:shadow-md cursor-pointer'
-                        }`}
+                        className={`rounded-lg overflow-hidden border-2 transition-all text-left ${cardClass}`}
                       >
                         <div className="aspect-video bg-gray-100">
-                          <img src={item.url} alt="" className="w-full h-full object-cover" />
+                          {isVideoMedia(item) ? (
+                            <div className="w-full h-full relative">
+                              <video
+                                src={item.url}
+                                className="w-full h-full object-cover"
+                                muted
+                                preload="metadata"
+                                playsInline
+                              />
+                              <div className="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">
+                                VIDEO
+                              </div>
+                            </div>
+                          ) : (
+                            <img src={item.url} alt="" className="w-full h-full object-cover" />
+                          )}
                         </div>
                         <div className="p-2">
                           <p className="text-xs truncate text-gray-700">{item.original_name}</p>
+                          {isVideoMedia(item) && <p className="text-xs text-indigo-600">Reproduce completo</p>}
                           {inPlaylist && <p className="text-xs text-green-600">Ya agregado</p>}
+                          {!inPlaylist && isSelected && (
+                            <p className="text-xs text-indigo-600">Seleccionado</p>
+                          )}
                         </div>
                       </button>
                     );

@@ -3,6 +3,37 @@ const auth = require('../middleware/auth');
 const { Screen, Venue, Media, ScreenMedia } = require('../models');
 const { publishPlaylist, publishCommand } = require('../services/mqtt');
 
+// Endpoint público para que el player pueda resincronizar playlist sin JWT.
+router.get('/by-device/:deviceId/playlist', async (req, res) => {
+  try {
+    const screen = await Screen.findOne({ where: { device_id: req.params.deviceId } });
+    if (!screen) return res.status(404).json({ error: 'Pantalla no encontrada' });
+
+    const rows = await ScreenMedia.findAll({
+      where: { screen_id: screen.id },
+      include: [{ model: Media, as: 'Media' }],
+      order: [['position', 'ASC']],
+    });
+
+    const playlistData = rows
+      .filter((r) => r.Media != null)
+      .map((r) => ({
+        id: r.Media.id,
+        url: r.Media.url,
+        filename: r.Media.original_name,
+        mime_type: r.Media.mime_type,
+        size: r.Media.size,
+        duration: r.duration,
+        position: r.position,
+      }));
+
+    res.json({ items: playlistData });
+  } catch (err) {
+    console.error('[screens GET /by-device/:deviceId/playlist]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.use(auth);
 
 router.get('/', async (req, res) => {
@@ -91,7 +122,7 @@ router.post('/:id/playlist', async (req, res) => {
         screen_id: screen.id,
         media_id:  Number(item.media_id),
         duration:  Number(item.duration) || 10,
-        position:  item.position !== undefined ? Number(item.position) : idx,
+        position:  item.position === undefined ? idx : Number(item.position),
       }))
       .filter((row) => row.media_id && !Number.isNaN(row.media_id));
 
@@ -134,6 +165,8 @@ router.post('/:id/playlist', async (req, res) => {
         id:       r.Media.id,
         url:      r.Media.url,
         filename: r.Media.original_name,
+        mime_type: r.Media.mime_type,
+        size:      r.Media.size,
         duration: r.duration,
         position: r.position,
       }));
