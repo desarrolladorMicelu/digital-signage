@@ -44,7 +44,19 @@ export default function App() {
 
   const resolveMediaUrl = useCallback((item) => {
     const rawUrl = item?.url || '';
-    return rawUrl.startsWith('http') ? rawUrl : `${API_URL}${rawUrl}`;
+    if (!rawUrl) return '';
+    if (!rawUrl.startsWith('http')) return `${API_URL}${rawUrl}`;
+    try {
+      const parsed = new URL(rawUrl);
+      // Si viene una URL absoluta vieja (ej. producción), forzamos host actual
+      // cuando apunta al directorio esperado de media.
+      if (parsed.pathname.startsWith('/uploads/')) {
+        return `${API_URL}${parsed.pathname}`;
+      }
+      return rawUrl;
+    } catch {
+      return rawUrl;
+    }
   }, []);
 
   const isVideoMedia = useCallback((item) => {

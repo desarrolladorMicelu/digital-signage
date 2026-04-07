@@ -31,6 +31,7 @@ class MainActivity : Activity() {
 
     // ===== CONFIGURAR ESTOS VALORES =====
     private val PLAYER_BASE_URL = "http://20.81.42.176:5174"
+    //private val PLAYER_BASE_URL = "http://192.168.0.11:5174"
     // Cada cuántos segundos reintenta si no hay red
     private val RETRY_INTERVAL_MS = 5000L
     // =====================================
