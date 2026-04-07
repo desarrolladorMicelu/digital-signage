@@ -18,7 +18,6 @@ export default function App() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [connected, setConnected] = useState(false);
   const [fade, setFade] = useState(true);
-  const [videoReady, setVideoReady] = useState(false);
   // {done, total} mientras descarga nueva playlist; null si no hay descarga activa
   const [downloadProgress, setDownloadProgress] = useState(null);
 
@@ -27,8 +26,7 @@ export default function App() {
   const heartbeatRef = useRef(null);
   const syncRef = useRef(null);
   const retryVideoRef = useRef(null);
-  const videoReadyTimeoutRef = useRef(null);
-  const currentIsVideoRef = useRef(false);
+  const videoRef = useRef(null);
   const playlistSigRef = useRef('');
   // remoteUrl → blobUrl (o remoteUrl como fallback)
   const mediaBlobMapRef = useRef(new Map());
@@ -171,7 +169,6 @@ export default function App() {
     // Activar la nueva playlist de golpe — todo está listo localmente
     setActivePlaylist(items);
     setCurrentIndex(0);
-    setVideoReady(false);
     setDownloadProgress(null);
 
     console.log(`[Player] Playlist activa (${source}): ${items.length} ítems listos localmente`);
@@ -281,7 +278,6 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
-      if (videoReadyTimeoutRef.current) clearTimeout(videoReadyTimeoutRef.current);
       for (const blobUrl of mediaBlobMapRef.current.values()) {
         if (String(blobUrl).startsWith('blob:')) URL.revokeObjectURL(blobUrl);
       }
@@ -290,31 +286,33 @@ export default function App() {
 
   // ─── Avance de slides ─────────────────────────────────────────────────────
 
-  const markVideoReady = useCallback(() => {
-    if (videoReadyTimeoutRef.current) clearTimeout(videoReadyTimeoutRef.current);
-    setVideoReady(true);
-  }, []);
-
-  // Arranca timeout de seguridad cada vez que cambia el video actual
+  // ─── Control directo del elemento <video> persistente ───────────────────
+  // Un solo elemento <video> vive siempre en el DOM; solo se le cambia src.
+  // Esto evita que Android WebView destruya/recree la capa de hardware nativa
+  // en cada transición, eliminando el placeholder gris por completo.
   useEffect(() => {
-    if (!currentIsVideoRef.current) return;
-    if (videoReadyTimeoutRef.current) clearTimeout(videoReadyTimeoutRef.current);
-    // Si en 4s ningún evento disparó videoReady, mostramos el video igual
-    videoReadyTimeoutRef.current = setTimeout(() => {
-      setVideoReady(true);
-    }, 4000);
-    return () => {
-      if (videoReadyTimeoutRef.current) clearTimeout(videoReadyTimeoutRef.current);
-    };
+    const v = videoRef.current;
+    if (!v) return;
+    if (!currentIsVideo || !imageUrl) {
+      v.pause();
+      v.removeAttribute('src');
+      v.load();
+      return;
+    }
+    // Solo recarga si la URL cambió
+    if (v.src !== imageUrl) {
+      v.src = imageUrl;
+      v.load();
+    }
+    v.play().catch((e) => console.warn('[Player] play() rechazado:', e));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentIndex, activePlaylist]);
+  }, [currentIndex, imageUrl, currentIsVideo]);
 
   const advanceSlide = useCallback(() => {
     setFade(false);
     setTimeout(() => {
       setCurrentIndex((prev) => (prev + 1) % activePlaylist.length);
       setFade(true);
-      setVideoReady(false);
     }, 500);
   }, [activePlaylist.length]);
 
@@ -360,7 +358,6 @@ export default function App() {
   const currentMedia = activePlaylist[currentIndex];
   const imageUrl = getPlaybackUrl(currentMedia);
   const currentIsVideo = isVideoMedia(currentMedia);
-  currentIsVideoRef.current = currentIsVideo;
 
   return (
     <div style={styles.player}>
@@ -371,43 +368,44 @@ export default function App() {
         </div>
       )}
 
-      {/* Fondo negro mientras el video carga — oculta el placeholder nativo del OS */}
-      {currentIsVideo && !videoReady && <div style={styles.videoLoading} />}
+      {/*
+        El <video> vive SIEMPRE en el DOM — Android WebView mantiene la capa de hardware
+        nativa abierta, por lo que cambiar src es instantáneo (sin placeholder).
+        Se oculta con display:none solo cuando el ítem actual es una imagen.
+      */}
+      <video
+        ref={videoRef}
+        style={{ ...styles.slide, display: currentIsVideo ? 'block' : 'none' }}
+        muted
+        playsInline
+        preload="auto"
+        loop={activePlaylist.length === 1}
+        onEnded={() => { if (activePlaylist.length > 1) advanceSlide(); }}
+        onError={() => {
+          console.error('[Player] Error cargando video:', imageUrl);
+          if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
+          retryVideoRef.current = setTimeout(async () => {
+            const [remoteUrl, blobUrl] = await downloadItem(currentMedia);
+            if (remoteUrl) {
+              mediaBlobMapRef.current.set(remoteUrl, blobUrl);
+              if (videoRef.current) {
+                videoRef.current.src = blobUrl || remoteUrl;
+                videoRef.current.load();
+                videoRef.current.play().catch(() => {});
+              }
+            }
+          }, 2000);
+        }}
+      />
 
-      {currentIsVideo ? (
-        <video
-          key={`${currentMedia?.id}-${currentIndex}`}
-          src={imageUrl}
-          style={{ ...styles.slide, opacity: videoReady && fade ? 1 : 0, transition: 'opacity 0.4s ease-in-out' }}
-          autoPlay
-          playsInline
-          muted
-          preload="auto"
-          loop={activePlaylist.length === 1}
-          onCanPlay={markVideoReady}
-          onCanPlayThrough={markVideoReady}
-          onLoadedData={markVideoReady}
-          onLoadedMetadata={markVideoReady}
-          onPlay={markVideoReady}
-          onEnded={() => { if (activePlaylist.length > 1) advanceSlide(); }}
-          onError={() => {
-            console.error('[Player] Error cargando video:', imageUrl);
-            if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
-            retryVideoRef.current = setTimeout(async () => {
-              const [remoteUrl, blobUrl] = await downloadItem(currentMedia);
-              if (remoteUrl) mediaBlobMapRef.current.set(remoteUrl, blobUrl);
-              setVideoReady(false);
-            }, 2000);
-          }}
-        />
-      ) : (
+      {/* Las imágenes se superponen encima del video con transición suave */}
+      {!currentIsVideo && (
         <img
           key={`${currentMedia?.id}-${currentIndex}`}
           src={imageUrl}
           alt=""
           style={{ ...styles.slide, opacity: fade ? 1 : 0, transition: 'opacity 0.5s ease-in-out' }}
           onError={() => console.error('[Player] Error cargando imagen:', imageUrl)}
-          onLoad={() => {}}
         />
       )}
     </div>
@@ -474,12 +472,6 @@ const styles = {
     width: '100%',
     height: '100%',
     objectFit: 'contain',
-  },
-  videoLoading: {
-    position: 'absolute',
-    inset: 0,
-    background: '#000',
-    zIndex: 5,
   },
   downloadBadge: {
     position: 'absolute',
