@@ -27,6 +27,8 @@ export default function App() {
   const heartbeatRef = useRef(null);
   const syncRef = useRef(null);
   const retryVideoRef = useRef(null);
+  const videoReadyTimeoutRef = useRef(null);
+  const currentIsVideoRef = useRef(false);
   const playlistSigRef = useRef('');
   // remoteUrl → blobUrl (o remoteUrl como fallback)
   const mediaBlobMapRef = useRef(new Map());
@@ -279,6 +281,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
+      if (videoReadyTimeoutRef.current) clearTimeout(videoReadyTimeoutRef.current);
       for (const blobUrl of mediaBlobMapRef.current.values()) {
         if (String(blobUrl).startsWith('blob:')) URL.revokeObjectURL(blobUrl);
       }
@@ -286,6 +289,25 @@ export default function App() {
   }, []);
 
   // ─── Avance de slides ─────────────────────────────────────────────────────
+
+  const markVideoReady = useCallback(() => {
+    if (videoReadyTimeoutRef.current) clearTimeout(videoReadyTimeoutRef.current);
+    setVideoReady(true);
+  }, []);
+
+  // Arranca timeout de seguridad cada vez que cambia el video actual
+  useEffect(() => {
+    if (!currentIsVideoRef.current) return;
+    if (videoReadyTimeoutRef.current) clearTimeout(videoReadyTimeoutRef.current);
+    // Si en 4s ningún evento disparó videoReady, mostramos el video igual
+    videoReadyTimeoutRef.current = setTimeout(() => {
+      setVideoReady(true);
+    }, 4000);
+    return () => {
+      if (videoReadyTimeoutRef.current) clearTimeout(videoReadyTimeoutRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIndex, activePlaylist]);
 
   const advanceSlide = useCallback(() => {
     setFade(false);
@@ -338,6 +360,7 @@ export default function App() {
   const currentMedia = activePlaylist[currentIndex];
   const imageUrl = getPlaybackUrl(currentMedia);
   const currentIsVideo = isVideoMedia(currentMedia);
+  currentIsVideoRef.current = currentIsVideo;
 
   return (
     <div style={styles.player}>
@@ -361,19 +384,21 @@ export default function App() {
           muted
           preload="auto"
           loop={activePlaylist.length === 1}
-          onCanPlay={() => setVideoReady(true)}
+          onCanPlay={markVideoReady}
+          onCanPlayThrough={markVideoReady}
+          onLoadedData={markVideoReady}
+          onLoadedMetadata={markVideoReady}
+          onPlay={markVideoReady}
           onEnded={() => { if (activePlaylist.length > 1) advanceSlide(); }}
           onError={() => {
             console.error('[Player] Error cargando video:', imageUrl);
             if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
             retryVideoRef.current = setTimeout(async () => {
-              // Re-descargar este ítem específico y reintentar
               const [remoteUrl, blobUrl] = await downloadItem(currentMedia);
               if (remoteUrl) mediaBlobMapRef.current.set(remoteUrl, blobUrl);
               setVideoReady(false);
             }, 2000);
           }}
-          onLoadedData={() => {}}
         />
       ) : (
         <img

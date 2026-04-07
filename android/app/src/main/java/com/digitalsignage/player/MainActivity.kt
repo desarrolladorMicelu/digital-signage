@@ -140,13 +140,20 @@ class MainActivity : Activity() {
             mediaPlaybackRequiresUserGesture = false
             loadWithOverviewMode = true
             useWideViewPort = true
-            cacheMode = WebSettings.LOAD_DEFAULT
+            // LOAD_NO_CACHE: evita servir recursos obsoletos; el player maneja su propio caché
+            cacheMode = WebSettings.LOAD_NO_CACHE
             allowFileAccess = true
             databaseEnabled = true
+            // Necesario para que los blob:// URLs generados por el player funcionen en WebView
+            @Suppress("SetJavaScriptEnabled")
+            allowUniversalAccessFromFileURLs = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             }
         }
+
+        // Habilitar reproducción de video en segundo plano y aceleración por hardware
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
         webView.webChromeClient = WebChromeClient()
 
