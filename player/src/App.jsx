@@ -3,7 +3,6 @@ import mqtt from 'mqtt';
 
 const params = new URLSearchParams(globalThis.location.search);
 const DEVICE_ID = params.get('device') || 'screen-001';
-/** Si abres el player por IP/Dominio, HOST ya apunta al PC. En Android usa http://IP_PC:5174/?device=... */
 const HOST = params.get('host') || globalThis.location.hostname || 'localhost';
 const API_PORT = params.get('api_port') || '3000';
 const MQTT_PORT = params.get('mqtt_port') || '8083';
@@ -15,20 +14,24 @@ const MEDIA_CACHE_NAME = 'signage-media-v1';
 const SYNC_INTERVAL_MS = 30000;
 
 export default function App() {
-  const [playlist, setPlaylist] = useState([]);
+  const [activePlaylist, setActivePlaylist] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [connected, setConnected] = useState(false);
   const [fade, setFade] = useState(true);
-  const [imageError, setImageError] = useState('');
-  const [reloadToken, setReloadToken] = useState(0);
-  const [currentImageSrc, setCurrentImageSrc] = useState('');
+  const [videoReady, setVideoReady] = useState(false);
+  // {done, total} mientras descarga nueva playlist; null si no hay descarga activa
+  const [downloadProgress, setDownloadProgress] = useState(null);
+
   const clientRef = useRef(null);
   const timerRef = useRef(null);
   const heartbeatRef = useRef(null);
   const syncRef = useRef(null);
   const retryVideoRef = useRef(null);
-  const blobUrlRef = useRef('');
   const playlistSigRef = useRef('');
+  // remoteUrl → blobUrl (o remoteUrl como fallback)
+  const mediaBlobMapRef = useRef(new Map());
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
 
   const makePlaylistSignature = useCallback((items) => {
     if (!Array.isArray(items)) return '[]';
@@ -49,22 +52,24 @@ export default function App() {
     if (!rawUrl.startsWith('http')) return `${API_URL}${rawUrl}`;
     try {
       const parsed = new URL(rawUrl);
-      // Si viene una URL absoluta vieja (ej. producción), forzamos host actual
-      // cuando apunta al directorio esperado de media.
-      if (parsed.pathname.startsWith('/uploads/')) {
-        return `${API_URL}${parsed.pathname}`;
-      }
+      if (parsed.pathname.startsWith('/uploads/')) return `${API_URL}${parsed.pathname}`;
       return rawUrl;
     } catch {
       return rawUrl;
     }
   }, []);
 
+  // Devuelve el blob URL local si está pre-descargado, o la URL remota como fallback.
+  const getPlaybackUrl = useCallback((item) => {
+    const remoteUrl = resolveMediaUrl(item);
+    if (!remoteUrl) return '';
+    return mediaBlobMapRef.current.get(remoteUrl) ?? remoteUrl;
+  }, [resolveMediaUrl]);
+
   const isVideoMedia = useCallback((item) => {
     const mime = String(item?.mime_type || '').toLowerCase();
     if (mime.startsWith('video/')) return true;
-    const url = String(item?.url || '').toLowerCase();
-    return /\.(mp4|webm|ogg|mov|m4v)(\?|$)/.test(url);
+    return /\.(mp4|webm|ogg|mov|m4v)(\?|$)/.test(String(item?.url || '').toLowerCase());
   }, []);
 
   const persistPlaylist = useCallback((items) => {
@@ -81,78 +86,104 @@ export default function App() {
       if (!raw) return [];
       const parsed = JSON.parse(raw);
       return Array.isArray(parsed?.items) ? parsed.items : [];
-    } catch (err) {
-      console.warn('[Player] No se pudo leer playlist local:', err);
+    } catch {
       return [];
     }
   }, []);
 
-  const cachePlaylistMedia = useCallback(async (items) => {
-    if (!('caches' in globalThis) || !Array.isArray(items) || items.length === 0) return;
+  // ─── Descarga individual ──────────────────────────────────────────────────
+
+  const downloadItem = useCallback(async (item) => {
+    const remoteUrl = resolveMediaUrl(item);
+    if (!remoteUrl) return [remoteUrl, remoteUrl];
+
+    // Ya está en memoria
+    const inMemory = mediaBlobMapRef.current.get(remoteUrl);
+    if (inMemory) return [remoteUrl, inMemory];
+
+    // Intentar red → blob + guardar en Cache API
     try {
-      const cache = await caches.open(MEDIA_CACHE_NAME);
-      for (const item of items) {
-        const mediaUrl = resolveMediaUrl(item);
-        try {
-          const response = await fetch(mediaUrl, { cache: 'no-store' });
-          if (response.ok) await cache.put(mediaUrl, response.clone());
-        } catch (err) {
-          console.warn('[Player] No se pudo cachear media:', mediaUrl, err);
+      const resp = await fetch(remoteUrl);
+      if (resp.ok) {
+        const blob = await resp.blob();
+        if ('caches' in globalThis) {
+          const cache = await caches.open(MEDIA_CACHE_NAME);
+          await cache.put(remoteUrl, new Response(blob.slice(), { headers: { 'Content-Type': blob.type } }));
         }
+        return [remoteUrl, URL.createObjectURL(blob)];
       }
-    } catch (err) {
-      console.warn('[Player] Error abriendo cache de media:', err);
+    } catch { /* sin red, intentar cache */ }
+
+    // Fallback: Cache API guardada previamente
+    if ('caches' in globalThis) {
+      try {
+        const cache = await caches.open(MEDIA_CACHE_NAME);
+        const cached = await cache.match(remoteUrl);
+        if (cached) {
+          const blob = await cached.blob();
+          return [remoteUrl, URL.createObjectURL(blob)];
+        }
+      } catch { /* ignorar */ }
     }
+
+    // Último fallback: URL remota (bufferiza en tiempo real)
+    console.warn('[Player] Sin caché para:', remoteUrl, '— usando URL remota');
+    return [remoteUrl, remoteUrl];
   }, [resolveMediaUrl]);
 
-  const pruneMediaCache = useCallback(async (items) => {
-    if (!('caches' in globalThis)) return;
-    try {
-      const keep = new Set(
-        (Array.isArray(items) ? items : [])
-          .map((item) => resolveMediaUrl(item))
-          .filter(Boolean)
-      );
-      const cache = await caches.open(MEDIA_CACHE_NAME);
-      const requests = await cache.keys();
+  // ─── Descarga toda la playlist y luego la activa ──────────────────────────
 
-      await Promise.all(
-        requests.map(async (req) => {
-          if (!keep.has(req.url)) {
-            await cache.delete(req);
-          }
-        })
-      );
-    } catch (err) {
-      console.warn('[Player] Error limpiando cache de media:', err);
-    }
-  }, [resolveMediaUrl]);
+  const downloadAndActivate = useCallback(async (items, source) => {
+    if (!Array.isArray(items) || items.length === 0) return;
 
-  const evictMediaFromCache = useCallback(async (url) => {
-    if (!url || !('caches' in globalThis)) return;
-    try {
-      const cache = await caches.open(MEDIA_CACHE_NAME);
-      await cache.delete(url);
-    } catch (err) {
-      console.warn('[Player] Error borrando media fallida de cache:', err);
+    console.log(`[Player] Descargando playlist (${source}): ${items.length} ítems`);
+    setDownloadProgress({ done: 0, total: items.length });
+
+    const newBlobMap = new Map();
+    for (let i = 0; i < items.length; i++) {
+      const [remoteUrl, blobUrl] = await downloadItem(items[i]);
+      if (remoteUrl) newBlobMap.set(remoteUrl, blobUrl);
+      setDownloadProgress({ done: i + 1, total: items.length });
     }
-  }, []);
+
+    // Liberar blobs que ya no están en la nueva playlist
+    for (const [url, blobUrl] of mediaBlobMapRef.current) {
+      if (!newBlobMap.has(url) && String(blobUrl).startsWith('blob:')) {
+        URL.revokeObjectURL(blobUrl);
+      }
+    }
+
+    // Limpiar Cache API de recursos obsoletos
+    if ('caches' in globalThis) {
+      try {
+        const keep = new Set(newBlobMap.keys());
+        const cache = await caches.open(MEDIA_CACHE_NAME);
+        const keys = await cache.keys();
+        await Promise.all(keys.filter((r) => !keep.has(r.url)).map((r) => cache.delete(r)));
+      } catch { /* ignorar */ }
+    }
+
+    mediaBlobMapRef.current = newBlobMap;
+    persistPlaylist(items);
+
+    // Activar la nueva playlist de golpe — todo está listo localmente
+    setActivePlaylist(items);
+    setCurrentIndex(0);
+    setVideoReady(false);
+    setDownloadProgress(null);
+
+    console.log(`[Player] Playlist activa (${source}): ${items.length} ítems listos localmente`);
+  }, [downloadItem, persistPlaylist]);
+
+  // ─── Dedup + encolar descarga ─────────────────────────────────────────────
 
   const applyPlaylist = useCallback((items, source = 'unknown') => {
     if (!Array.isArray(items)) return;
     const nextSig = makePlaylistSignature(items);
     if (nextSig === playlistSigRef.current) return;
-
     playlistSigRef.current = nextSig;
-    setPlaylist(items);
-    setCurrentIndex(0);
-    setImageError('');
-    setReloadToken((t) => t + 1);
-    persistPlaylist(items);
-    cachePlaylistMedia(items);
-    pruneMediaCache(items);
-    console.log(`[Player] Playlist aplicada desde ${source}:`, items.length, 'ítems');
-  }, [cachePlaylistMedia, makePlaylistSignature, persistPlaylist, pruneMediaCache]);
+    downloadAndActivate(items, source);
+  }, [makePlaylistSignature, downloadAndActivate]);
 
   const syncPlaylistFromApi = useCallback(async () => {
     if (!navigator.onLine) return;
@@ -160,20 +191,24 @@ export default function App() {
       const resp = await fetch(PLAYLIST_API_URL, { cache: 'no-store' });
       if (!resp.ok) return;
       const data = await resp.json();
-      if (Array.isArray(data?.items)) {
-        applyPlaylist(data.items, 'api-sync');
-      }
+      if (Array.isArray(data?.items)) applyPlaylist(data.items, 'api-sync');
     } catch (err) {
       console.warn('[Player] Error sincronizando playlist por API:', err);
     }
   }, [applyPlaylist]);
 
+  // ─── Arranque: cargar playlist persistida ────────────────────────────────
+
+  useEffect(() => {
+    const persisted = readPersistedPlaylist();
+    if (persisted.length > 0) applyPlaylist(persisted, 'local-storage');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ─── MQTT + intervalo de sync ─────────────────────────────────────────────
+
   useEffect(() => {
     console.log('[Player] Endpoints', { DEVICE_ID, API_URL, MQTT_URL });
-    const persisted = readPersistedPlaylist();
-    if (persisted.length > 0) {
-      applyPlaylist(persisted, 'local-storage');
-    }
 
     const client = mqtt.connect(MQTT_URL, {
       clientId: `player-${DEVICE_ID}-${Date.now()}`,
@@ -184,89 +219,53 @@ export default function App() {
     clientRef.current = client;
 
     client.on('connect', () => {
-      console.log(`[Player] Conectado a MQTT (clientId=${client.options.clientId})`);
+      console.log('[Player] Conectado a MQTT');
       setConnected(true);
-      // Al reconectar a MQTT, forzamos recarga de la imagen para evitar "pantalla congelada"
-      setImageError('');
-      setReloadToken((t) => t + 1);
       client.subscribe(`signage/${DEVICE_ID}/playlist`, { qos: 1 });
       client.subscribe(`signage/${DEVICE_ID}/command`, { qos: 1 });
       syncPlaylistFromApi();
-
-      client.publish(`signage/${DEVICE_ID}/heartbeat`, JSON.stringify({
-        timestamp: Date.now(),
-        status: 'connected',
-      }));
+      client.publish(`signage/${DEVICE_ID}/heartbeat`, JSON.stringify({ timestamp: Date.now(), status: 'connected' }));
     });
 
     client.on('message', (topic, message) => {
       try {
         const data = JSON.parse(message.toString());
-
-        if (topic.endsWith('/playlist')) {
-          const n = Array.isArray(data.items) ? data.items.length : 0;
-          console.log('[Player] Mensaje playlist:', n, 'ítems', data);
-          if (data.items && Array.isArray(data.items)) applyPlaylist(data.items, 'mqtt');
-        }
-
-        if (topic.endsWith('/command')) {
-          console.log('[Player] Comando recibido:', data);
-          if (data.type === 'reload') globalThis.location.reload();
-        }
+        if (topic.endsWith('/playlist') && Array.isArray(data?.items)) applyPlaylist(data.items, 'mqtt');
+        if (topic.endsWith('/command') && data.type === 'reload') globalThis.location.reload();
       } catch (err) {
         console.error('[Player] Error parsing message:', err);
       }
     });
 
-    client.on('close', () => {
-      console.warn('[Player] MQTT cerrado (red, broker o otra pestaña con mismo clientId en algunos brokers)');
-      setConnected(false);
-    });
+    client.on('close', () => setConnected(false));
     client.on('reconnect', () => console.log('[Player] Reconectando MQTT...'));
     client.on('offline', () => console.warn('[Player] MQTT offline'));
     client.on('error', (err) => console.error('[Player] MQTT error:', err));
 
     heartbeatRef.current = setInterval(() => {
       if (client.connected) {
-        client.publish(`signage/${DEVICE_ID}/heartbeat`, JSON.stringify({
-          timestamp: Date.now(),
-          status: 'playing',
-        }));
+        client.publish(`signage/${DEVICE_ID}/heartbeat`, JSON.stringify({ timestamp: Date.now(), status: 'playing' }));
       }
     }, 30000);
 
-    syncRef.current = setInterval(() => {
-      syncPlaylistFromApi();
-    }, SYNC_INTERVAL_MS);
+    syncRef.current = setInterval(syncPlaylistFromApi, SYNC_INTERVAL_MS);
 
     return () => {
       clearInterval(heartbeatRef.current);
       clearInterval(syncRef.current);
       client.end();
     };
-  }, [applyPlaylist, readPersistedPlaylist, syncPlaylistFromApi]);
+  }, [applyPlaylist, syncPlaylistFromApi]);
 
-  // Manejo básico online/offline para evitar que quede en error tras caer internet.
+  // ─── online / offline ─────────────────────────────────────────────────────
+
   useEffect(() => {
     function handleOnline() {
-      console.log('[Player] Evento: online');
       setConnected(true);
-      setImageError('');
-      setReloadToken((t) => t + 1);
       syncPlaylistFromApi();
-      try {
-        clientRef.current?.reconnect?.();
-      } catch (e) {
-        console.warn('[Player] reconnect() falló:', e);
-      }
+      try { clientRef.current?.reconnect?.(); } catch { /* ignorar */ }
     }
-
-    function handleOffline() {
-      console.warn('[Player] Evento: offline');
-      setConnected(false);
-      // No sobreescribimos imageError si ya estabas mostrando un mensaje de error de carga.
-    }
-
+    function handleOffline() { setConnected(false); }
     globalThis.addEventListener('online', handleOnline);
     globalThis.addEventListener('offline', handleOffline);
     return () => {
@@ -275,77 +274,44 @@ export default function App() {
     };
   }, [syncPlaylistFromApi]);
 
-  useEffect(() => {
-    const currentMedia = playlist[currentIndex];
-    if (!currentMedia) {
-      setCurrentImageSrc('');
-      return;
-    }
-
-    let cancelled = false;
-    const remoteUrl = resolveMediaUrl(currentMedia);
-
-    async function resolveImageSource() {
-      if (!('caches' in globalThis)) {
-        if (!cancelled) setCurrentImageSrc(remoteUrl);
-        return;
-      }
-      try {
-        const cache = await caches.open(MEDIA_CACHE_NAME);
-        const cachedResp = await cache.match(remoteUrl);
-        if (cachedResp) {
-          const blob = await cachedResp.blob();
-          if (!cancelled) {
-            if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
-            blobUrlRef.current = URL.createObjectURL(blob);
-            setCurrentImageSrc(blobUrlRef.current);
-          }
-          return;
-        }
-      } catch (err) {
-        console.warn('[Player] Error leyendo cache local:', err);
-      }
-      if (!cancelled) setCurrentImageSrc(remoteUrl);
-    }
-
-    resolveImageSource();
-    return () => {
-      cancelled = true;
-    };
-  }, [currentIndex, playlist, reloadToken, resolveMediaUrl]);
+  // ─── Cleanup blob URLs al desmontar ──────────────────────────────────────
 
   useEffect(() => {
     return () => {
       if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
-      if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+      for (const blobUrl of mediaBlobMapRef.current.values()) {
+        if (String(blobUrl).startsWith('blob:')) URL.revokeObjectURL(blobUrl);
+      }
     };
   }, []);
+
+  // ─── Avance de slides ─────────────────────────────────────────────────────
 
   const advanceSlide = useCallback(() => {
     setFade(false);
     setTimeout(() => {
-      setCurrentIndex((prev) => (prev + 1) % playlist.length);
+      setCurrentIndex((prev) => (prev + 1) % activePlaylist.length);
       setFade(true);
+      setVideoReady(false);
     }, 500);
-  }, [playlist.length]);
+  }, [activePlaylist.length]);
 
   useEffect(() => {
-    if (playlist.length <= 1) return;
-
-    const currentItem = playlist[currentIndex];
+    if (activePlaylist.length <= 1) return;
+    const currentItem = activePlaylist[currentIndex];
     if (isVideoMedia(currentItem)) return;
     const duration = (currentItem?.duration || 10) * 1000;
-
     timerRef.current = setTimeout(advanceSlide, duration);
     return () => clearTimeout(timerRef.current);
-  }, [currentIndex, playlist, advanceSlide, isVideoMedia]);
+  }, [currentIndex, activePlaylist, advanceSlide, isVideoMedia]);
 
-  // Single image: just show it without advancing
   useEffect(() => {
-    if (playlist.length === 1) setFade(true);
-  }, [playlist]);
+    if (activePlaylist.length === 1) setFade(true);
+  }, [activePlaylist]);
 
-  if (playlist.length === 0) {
+  // ─── Render: esperando contenido ─────────────────────────────────────────
+
+  if (activePlaylist.length === 0) {
     return (
       <div style={styles.waiting}>
         <div style={styles.waitingContent}>
@@ -353,12 +319,13 @@ export default function App() {
           <h1 style={styles.title}>Digital Signage Mi celu</h1>
           <p style={styles.deviceId}>{DEVICE_ID}</p>
           <div style={styles.statusRow}>
-            <span style={{
-              ...styles.statusDot,
-              backgroundColor: connected ? '#22c55e' : '#ef4444',
-            }} />
+            <span style={{ ...styles.statusDot, backgroundColor: connected ? '#22c55e' : '#ef4444' }} />
             <span style={styles.statusText}>
-              {connected ? 'Conectado - Esperando contenido...' : 'Conectando al servidor...'}
+                      {(() => {
+                if (downloadProgress) return `Descargando contenido... ${downloadProgress.done}/${downloadProgress.total}`;
+                if (connected) return 'Conectado — esperando contenido...';
+                return 'Conectando al servidor...';
+              })()}
             </span>
           </div>
         </div>
@@ -366,63 +333,58 @@ export default function App() {
     );
   }
 
-  const currentMedia = playlist[currentIndex];
-  const imageUrl = currentImageSrc || resolveMediaUrl(currentMedia);
+  // ─── Render: reproduciendo ────────────────────────────────────────────────
+
+  const currentMedia = activePlaylist[currentIndex];
+  const imageUrl = getPlaybackUrl(currentMedia);
   const currentIsVideo = isVideoMedia(currentMedia);
 
   return (
     <div style={styles.player}>
-      {imageError ? (
-        <div style={styles.errorBanner}>{imageError}</div>
-      ) : null}
+      {/* Indicador discreto de descarga de nueva playlist (esquina inferior izquierda) */}
+      {downloadProgress && (
+        <div style={styles.downloadBadge}>
+          ↓ {downloadProgress.done}/{downloadProgress.total}
+        </div>
+      )}
+
+      {/* Fondo negro mientras el video carga — oculta el placeholder nativo del OS */}
+      {currentIsVideo && !videoReady && <div style={styles.videoLoading} />}
+
       {currentIsVideo ? (
         <video
-          key={`${currentMedia?.id}-${currentIndex}-${reloadToken}`}
+          key={`${currentMedia?.id}-${currentIndex}`}
           src={imageUrl}
-          style={{
-            ...styles.slide,
-            opacity: fade ? 1 : 0,
-            transition: 'opacity 0.5s ease-in-out',
-          }}
+          style={{ ...styles.slide, opacity: videoReady && fade ? 1 : 0, transition: 'opacity 0.4s ease-in-out' }}
           autoPlay
           playsInline
           muted
-          loop={playlist.length === 1}
-          onEnded={() => {
-            if (playlist.length > 1) advanceSlide();
-          }}
+          preload="auto"
+          loop={activePlaylist.length === 1}
+          onCanPlay={() => setVideoReady(true)}
+          onEnded={() => { if (activePlaylist.length > 1) advanceSlide(); }}
           onError={() => {
-            const msg = `No se pudo cargar el video. URL: ${imageUrl} (API debe ser alcanzable desde este dispositivo; en TV/Android usa la IP del PC, no localhost).`;
-            console.error('[Player]', msg);
-            setImageError(msg);
-            evictMediaFromCache(imageUrl);
+            console.error('[Player] Error cargando video:', imageUrl);
             if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
-            // No saltamos el video: reintentamos el mismo ítem.
-            retryVideoRef.current = setTimeout(() => {
-              setReloadToken((t) => t + 1);
+            retryVideoRef.current = setTimeout(async () => {
+              // Re-descargar este ítem específico y reintentar
+              const [remoteUrl, blobUrl] = await downloadItem(currentMedia);
+              if (remoteUrl) mediaBlobMapRef.current.set(remoteUrl, blobUrl);
+              setVideoReady(false);
             }, 2000);
           }}
-          onLoadedData={() => setImageError('')}
+          onLoadedData={() => {}}
         />
       ) : (
         <img
-          key={`${currentMedia?.id}-${currentIndex}-${reloadToken}`}
+          key={`${currentMedia?.id}-${currentIndex}`}
           src={imageUrl}
           alt=""
-          style={{
-            ...styles.slide,
-            opacity: fade ? 1 : 0,
-            transition: 'opacity 0.5s ease-in-out',
-          }}
-          onError={() => {
-            const msg = `No se pudo cargar la imagen. URL: ${imageUrl} (API debe ser alcanzable desde este dispositivo; en TV/Android usa la IP del PC, no localhost).`;
-            console.error('[Player]', msg);
-            setImageError(msg);
-          }}
-          onLoad={() => setImageError('')}
+          style={{ ...styles.slide, opacity: fade ? 1 : 0, transition: 'opacity 0.5s ease-in-out' }}
+          onError={() => console.error('[Player] Error cargando imagen:', imageUrl)}
+          onLoad={() => {}}
         />
       )}
-
     </div>
   );
 }
@@ -488,17 +450,22 @@ const styles = {
     height: '100%',
     objectFit: 'contain',
   },
-  errorBanner: {
+  videoLoading: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
+    inset: 0,
+    background: '#000',
+    zIndex: 5,
+  },
+  downloadBadge: {
+    position: 'absolute',
+    bottom: '10px',
+    left: '10px',
+    background: 'rgba(0,0,0,0.5)',
+    color: '#94a3b8',
+    padding: '3px 8px',
+    borderRadius: '4px',
+    fontSize: '11px',
+    fontFamily: 'monospace',
     zIndex: 10,
-    background: '#7f1d1d',
-    color: '#fecaca',
-    padding: '12px 16px',
-    fontSize: '14px',
-    fontFamily: 'system-ui, sans-serif',
-    textAlign: 'center',
   },
 };
