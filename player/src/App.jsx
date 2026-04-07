@@ -284,29 +284,35 @@ export default function App() {
     };
   }, []);
 
-  // ─── Avance de slides ─────────────────────────────────────────────────────
+  // ─── Valores derivados (ANTES de los hooks que los usan) ────────────────
+  const currentMedia = activePlaylist.length > 0 ? activePlaylist[currentIndex] : null;
+  const currentPlaybackUrl = currentMedia ? getPlaybackUrl(currentMedia) : '';
+  const currentIsVideo = currentMedia ? isVideoMedia(currentMedia) : false;
 
-  // ─── Control directo del elemento <video> persistente ───────────────────
-  // Un solo elemento <video> vive siempre en el DOM; solo se le cambia src.
-  // Esto evita que Android WebView destruya/recree la capa de hardware nativa
-  // en cada transición, eliminando el placeholder gris por completo.
+  // ─── Control del <video> persistente ───────────────────────────────────
+  const prevSrcRef = useRef('');
+
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    if (!currentIsVideo || !imageUrl) {
-      v.pause();
-      v.removeAttribute('src');
-      v.load();
+
+    if (!currentIsVideo || !currentPlaybackUrl) {
+      if (prevSrcRef.current) {
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
+        prevSrcRef.current = '';
+      }
       return;
     }
-    // Solo recarga si la URL cambió
-    if (v.src !== imageUrl) {
-      v.src = imageUrl;
+
+    if (prevSrcRef.current !== currentPlaybackUrl) {
+      prevSrcRef.current = currentPlaybackUrl;
+      v.src = currentPlaybackUrl;
       v.load();
+      v.play().catch(() => {});
     }
-    v.play().catch((e) => console.warn('[Player] play() rechazado:', e));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentIndex, imageUrl, currentIsVideo]);
+  }, [currentIndex, currentPlaybackUrl, currentIsVideo]);
 
   const advanceSlide = useCallback(() => {
     setFade(false);
@@ -318,12 +324,11 @@ export default function App() {
 
   useEffect(() => {
     if (activePlaylist.length <= 1) return;
-    const currentItem = activePlaylist[currentIndex];
-    if (isVideoMedia(currentItem)) return;
-    const duration = (currentItem?.duration || 10) * 1000;
+    if (currentIsVideo) return;
+    const duration = (currentMedia?.duration || 10) * 1000;
     timerRef.current = setTimeout(advanceSlide, duration);
     return () => clearTimeout(timerRef.current);
-  }, [currentIndex, activePlaylist, advanceSlide, isVideoMedia]);
+  }, [currentIndex, activePlaylist, currentMedia, currentIsVideo, advanceSlide]);
 
   useEffect(() => {
     if (activePlaylist.length === 1) setFade(true);
@@ -341,7 +346,7 @@ export default function App() {
           <div style={styles.statusRow}>
             <span style={{ ...styles.statusDot, backgroundColor: connected ? '#22c55e' : '#ef4444' }} />
             <span style={styles.statusText}>
-                      {(() => {
+              {(() => {
                 if (downloadProgress) return `Descargando contenido... ${downloadProgress.done}/${downloadProgress.total}`;
                 if (connected) return 'Conectado — esperando contenido...';
                 return 'Conectando al servidor...';
@@ -355,57 +360,51 @@ export default function App() {
 
   // ─── Render: reproduciendo ────────────────────────────────────────────────
 
-  const currentMedia = activePlaylist[currentIndex];
-  const imageUrl = getPlaybackUrl(currentMedia);
-  const currentIsVideo = isVideoMedia(currentMedia);
-
   return (
     <div style={styles.player}>
-      {/* Indicador discreto de descarga de nueva playlist (esquina inferior izquierda) */}
       {downloadProgress && (
         <div style={styles.downloadBadge}>
           ↓ {downloadProgress.done}/{downloadProgress.total}
         </div>
       )}
 
-      {/*
-        El <video> vive SIEMPRE en el DOM — Android WebView mantiene la capa de hardware
-        nativa abierta, por lo que cambiar src es instantáneo (sin placeholder).
-        Se oculta con display:none solo cuando el ítem actual es una imagen.
-      */}
+      {/* Video persistente — siempre en el DOM, solo se cambia src */}
       <video
         ref={videoRef}
         style={{ ...styles.slide, display: currentIsVideo ? 'block' : 'none' }}
+        autoPlay
         muted
         playsInline
         preload="auto"
         loop={activePlaylist.length === 1}
         onEnded={() => { if (activePlaylist.length > 1) advanceSlide(); }}
         onError={() => {
-          console.error('[Player] Error cargando video:', imageUrl);
+          console.error('[Player] Error video:', currentPlaybackUrl);
           if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
           retryVideoRef.current = setTimeout(async () => {
+            if (!currentMedia) return;
             const [remoteUrl, blobUrl] = await downloadItem(currentMedia);
             if (remoteUrl) {
               mediaBlobMapRef.current.set(remoteUrl, blobUrl);
-              if (videoRef.current) {
-                videoRef.current.src = blobUrl || remoteUrl;
-                videoRef.current.load();
-                videoRef.current.play().catch(() => {});
+              const v = videoRef.current;
+              if (v) {
+                prevSrcRef.current = blobUrl || remoteUrl;
+                v.src = prevSrcRef.current;
+                v.load();
+                v.play().catch(() => {});
               }
             }
           }, 2000);
         }}
       />
 
-      {/* Las imágenes se superponen encima del video con transición suave */}
-      {!currentIsVideo && (
+      {!currentIsVideo && currentPlaybackUrl && (
         <img
           key={`${currentMedia?.id}-${currentIndex}`}
-          src={imageUrl}
+          src={currentPlaybackUrl}
           alt=""
           style={{ ...styles.slide, opacity: fade ? 1 : 0, transition: 'opacity 0.5s ease-in-out' }}
-          onError={() => console.error('[Player] Error cargando imagen:', imageUrl)}
+          onError={() => console.error('[Player] Error imagen:', currentPlaybackUrl)}
         />
       )}
     </div>
