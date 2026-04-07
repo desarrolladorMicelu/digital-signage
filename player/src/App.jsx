@@ -26,6 +26,7 @@ export default function App() {
   const timerRef = useRef(null);
   const heartbeatRef = useRef(null);
   const syncRef = useRef(null);
+  const retryVideoRef = useRef(null);
   const blobUrlRef = useRef('');
   const playlistSigRef = useRef('');
 
@@ -126,6 +127,16 @@ export default function App() {
       console.warn('[Player] Error limpiando cache de media:', err);
     }
   }, [resolveMediaUrl]);
+
+  const evictMediaFromCache = useCallback(async (url) => {
+    if (!url || !('caches' in globalThis)) return;
+    try {
+      const cache = await caches.open(MEDIA_CACHE_NAME);
+      await cache.delete(url);
+    } catch (err) {
+      console.warn('[Player] Error borrando media fallida de cache:', err);
+    }
+  }, []);
 
   const applyPlaylist = useCallback((items, source = 'unknown') => {
     if (!Array.isArray(items)) return;
@@ -305,6 +316,7 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
       if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
     };
   }, []);
@@ -383,6 +395,12 @@ export default function App() {
             const msg = `No se pudo cargar el video. URL: ${imageUrl} (API debe ser alcanzable desde este dispositivo; en TV/Android usa la IP del PC, no localhost).`;
             console.error('[Player]', msg);
             setImageError(msg);
+            evictMediaFromCache(imageUrl);
+            if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
+            // No saltamos el video: reintentamos el mismo ítem.
+            retryVideoRef.current = setTimeout(() => {
+              setReloadToken((t) => t + 1);
+            }, 2000);
           }}
           onLoadedData={() => setImageError('')}
         />
@@ -454,11 +472,6 @@ const styles = {
     fontSize: '14px',
     color: '#94a3b8',
     fontFamily: 'system-ui, sans-serif',
-  },
-  serverInfo: {
-    fontSize: '11px',
-    color: '#475569',
-    fontFamily: 'monospace',
   },
   player: {
     width: '100vw',

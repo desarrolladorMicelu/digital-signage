@@ -3,6 +3,18 @@ const auth = require('../middleware/auth');
 const { Screen, Venue, Media, ScreenMedia } = require('../models');
 const { publishPlaylist, publishCommand } = require('../services/mqtt');
 
+function normalizeMediaUrl(url) {
+  if (!url) return '';
+  if (!String(url).startsWith('http')) return url;
+  try {
+    const parsed = new URL(url);
+    if (parsed.pathname.startsWith('/uploads/')) return parsed.pathname;
+    return url;
+  } catch {
+    return url;
+  }
+}
+
 // Endpoint público para que el player pueda resincronizar playlist sin JWT.
 router.get('/by-device/:deviceId/playlist', async (req, res) => {
   try {
@@ -19,7 +31,7 @@ router.get('/by-device/:deviceId/playlist', async (req, res) => {
       .filter((r) => r.Media != null)
       .map((r) => ({
         id: r.Media.id,
-        url: r.Media.url,
+        url: normalizeMediaUrl(r.Media.url),
         filename: r.Media.original_name,
         mime_type: r.Media.mime_type,
         size: r.Media.size,
@@ -163,7 +175,7 @@ router.post('/:id/playlist', async (req, res) => {
       .filter((r) => r.Media != null)
       .map((r) => ({
         id:       r.Media.id,
-        url:      r.Media.url,
+        url:      normalizeMediaUrl(r.Media.url),
         filename: r.Media.original_name,
         mime_type: r.Media.mime_type,
         size:      r.Media.size,
