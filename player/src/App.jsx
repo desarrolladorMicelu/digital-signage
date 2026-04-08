@@ -387,10 +387,11 @@ export default function App() {
         </div>
       )}
 
-      {/* Slot A — video persistente */}
+      {/* Slot A — video persistente. display:none cuando no está activo evita que la
+          superficie de hardware de Android se dibuje por debajo de las imágenes. */}
       <video
         ref={videoARef}
-        style={{ ...styles.slide, zIndex: activeSlot === 'A' ? 2 : 1 }}
+        style={{ ...styles.slide, zIndex: 2, display: currentIsVideo && activeSlot === 'A' ? 'block' : 'none' }}
         muted
         playsInline
         preload="auto"
@@ -418,7 +419,7 @@ export default function App() {
       {/* Slot B — video persistente */}
       <video
         ref={videoBRef}
-        style={{ ...styles.slide, zIndex: activeSlot === 'B' ? 2 : 1 }}
+        style={{ ...styles.slide, zIndex: 2, display: currentIsVideo && activeSlot === 'B' ? 'block' : 'none' }}
         muted
         playsInline
         preload="auto"
