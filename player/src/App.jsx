@@ -101,6 +101,19 @@ export default function App() {
     const inMemory = mediaBlobMapRef.current.get(remoteUrl);
     if (inMemory) return [remoteUrl, inMemory];
 
+    // Pre-decodifica imágenes en memoria para que al mostrarse rendericen en un frame
+    const predecode = (blobUrl, mimeType) => {
+      if (String(mimeType).startsWith('image/')) {
+        return new Promise((res) => {
+          const img = new Image();
+          img.onload = res;
+          img.onerror = res;
+          img.src = blobUrl;
+        });
+      }
+      return Promise.resolve();
+    };
+
     // Intentar red → blob + guardar en Cache API
     try {
       const resp = await fetch(remoteUrl);
@@ -110,7 +123,9 @@ export default function App() {
           const cache = await caches.open(MEDIA_CACHE_NAME);
           await cache.put(remoteUrl, new Response(blob.slice(), { headers: { 'Content-Type': blob.type } }));
         }
-        return [remoteUrl, URL.createObjectURL(blob)];
+        const blobUrl = URL.createObjectURL(blob);
+        await predecode(blobUrl, blob.type);
+        return [remoteUrl, blobUrl];
       }
     } catch { /* sin red, intentar cache */ }
 
@@ -121,7 +136,9 @@ export default function App() {
         const cached = await cache.match(remoteUrl);
         if (cached) {
           const blob = await cached.blob();
-          return [remoteUrl, URL.createObjectURL(blob)];
+          const blobUrl = URL.createObjectURL(blob);
+          await predecode(blobUrl, blob.type);
+          return [remoteUrl, blobUrl];
         }
       } catch { /* ignorar */ }
     }
