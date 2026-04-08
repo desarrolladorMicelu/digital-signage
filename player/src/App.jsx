@@ -140,11 +140,22 @@ export default function App() {
     setDownloadProgress({ done: 0, total: items.length });
 
     const newBlobMap = new Map();
-    for (let i = 0; i < items.length; i++) {
-      const [remoteUrl, blobUrl] = await downloadItem(items[i]);
-      if (remoteUrl) newBlobMap.set(remoteUrl, blobUrl);
-      setDownloadProgress({ done: i + 1, total: items.length });
-    }
+    let doneCount = 0;
+    // 3 workers en paralelo — cada uno procesa su "franja" de items
+    // Worker 0: items 0, 3, 6 | Worker 1: items 1, 4, 7 | Worker 2: items 2, 5
+    const CONCURRENCY = 3;
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, items.length) }, (_, w) =>
+        (async () => {
+          for (let i = w; i < items.length; i += CONCURRENCY) {
+            const [remoteUrl, blobUrl] = await downloadItem(items[i]);
+            if (remoteUrl) newBlobMap.set(remoteUrl, blobUrl);
+            doneCount += 1;
+            setDownloadProgress({ done: doneCount, total: items.length });
+          }
+        })()
+      )
+    );
 
     // Liberar blobs que ya no están en la nueva playlist
     for (const [url, blobUrl] of mediaBlobMapRef.current) {
