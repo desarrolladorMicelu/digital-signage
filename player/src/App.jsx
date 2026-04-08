@@ -18,17 +18,17 @@ export default function App() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [connected, setConnected] = useState(false);
   const [fade, setFade] = useState(true);
-  // {done, total} mientras descarga nueva playlist; null si no hay descarga activa
   const [downloadProgress, setDownloadProgress] = useState(null);
+  const [activeSlot, setActiveSlot] = useState('A');
 
   const clientRef = useRef(null);
   const timerRef = useRef(null);
   const heartbeatRef = useRef(null);
   const syncRef = useRef(null);
   const retryVideoRef = useRef(null);
-  const videoRef = useRef(null);
+  const videoARef = useRef(null);
+  const videoBRef = useRef(null);
   const playlistSigRef = useRef('');
-  // remoteUrl → blobUrl (o remoteUrl como fallback)
   const mediaBlobMapRef = useRef(new Map());
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -289,38 +289,57 @@ export default function App() {
   const currentPlaybackUrl = currentMedia ? getPlaybackUrl(currentMedia) : '';
   const currentIsVideo = currentMedia ? isVideoMedia(currentMedia) : false;
 
-  // ─── Control del <video> persistente ───────────────────────────────────
-  const prevSrcRef = useRef('');
+  const nextIdx = activePlaylist.length > 1 ? (currentIndex + 1) % activePlaylist.length : -1;
+  const nextMedia = nextIdx >= 0 ? activePlaylist[nextIdx] : null;
+  const nextPlaybackUrl = nextMedia ? getPlaybackUrl(nextMedia) : '';
+  const nextIsVideo = nextMedia ? isVideoMedia(nextMedia) : false;
 
+  // ─── Double-buffer: cargar video actual en slot activo ─────────────────
   useEffect(() => {
-    const v = videoRef.current;
+    const v = (activeSlot === 'A' ? videoARef : videoBRef).current;
     if (!v) return;
-
     if (!currentIsVideo || !currentPlaybackUrl) {
-      if (prevSrcRef.current) {
-        v.pause();
-        v.removeAttribute('src');
-        v.load();
-        prevSrcRef.current = '';
-      }
+      v.pause();
+      v.removeAttribute('src');
+      v.load();
       return;
     }
-
-    if (prevSrcRef.current !== currentPlaybackUrl) {
-      prevSrcRef.current = currentPlaybackUrl;
+    if (v.getAttribute('src') !== currentPlaybackUrl) {
       v.src = currentPlaybackUrl;
       v.load();
-      v.play().catch(() => {});
     }
-  }, [currentIndex, currentPlaybackUrl, currentIsVideo]);
+    v.play().catch(() => {});
+  }, [currentIndex, currentPlaybackUrl, currentIsVideo, activeSlot]);
 
+  // ─── Double-buffer: pre-cargar siguiente video en slot inactivo ────────
+  useEffect(() => {
+    const v = (activeSlot === 'A' ? videoBRef : videoARef).current;
+    if (!v) return;
+    if (!nextIsVideo || !nextPlaybackUrl || activePlaylist.length <= 1) {
+      v.pause();
+      v.removeAttribute('src');
+      v.load();
+      return;
+    }
+    if (v.getAttribute('src') !== nextPlaybackUrl) {
+      v.src = nextPlaybackUrl;
+      v.load();
+    }
+  }, [currentIndex, nextPlaybackUrl, nextIsVideo, activePlaylist.length, activeSlot]);
+
+  // ─── Avance de slides ─────────────────────────────────────────────────
   const advanceSlide = useCallback(() => {
-    setFade(false);
-    setTimeout(() => {
+    if (nextIsVideo) {
+      setActiveSlot((s) => (s === 'A' ? 'B' : 'A'));
       setCurrentIndex((prev) => (prev + 1) % activePlaylist.length);
-      setFade(true);
-    }, 500);
-  }, [activePlaylist.length]);
+    } else {
+      setFade(false);
+      setTimeout(() => {
+        setCurrentIndex((prev) => (prev + 1) % activePlaylist.length);
+        setFade(true);
+      }, 300);
+    }
+  }, [activePlaylist.length, nextIsVideo]);
 
   useEffect(() => {
     if (activePlaylist.length <= 1) return;
@@ -368,42 +387,69 @@ export default function App() {
         </div>
       )}
 
-      {/* Video persistente — siempre en el DOM, solo se cambia src */}
+      {/* Slot A — video persistente */}
       <video
-        ref={videoRef}
-        style={{ ...styles.slide, display: currentIsVideo ? 'block' : 'none' }}
-        autoPlay
+        ref={videoARef}
+        style={{ ...styles.slide, zIndex: activeSlot === 'A' ? 2 : 1 }}
         muted
         playsInline
         preload="auto"
-        loop={activePlaylist.length === 1}
-        onEnded={() => { if (activePlaylist.length > 1) advanceSlide(); }}
+        loop={activePlaylist.length === 1 && currentIsVideo}
+        onEnded={() => {
+          if (activeSlot !== 'A' || activePlaylist.length <= 1) return;
+          advanceSlide();
+        }}
         onError={() => {
-          console.error('[Player] Error video:', currentPlaybackUrl);
+          if (activeSlot !== 'A') return;
+          console.error('[Player] Error video slot A');
           if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
           retryVideoRef.current = setTimeout(async () => {
             if (!currentMedia) return;
             const [remoteUrl, blobUrl] = await downloadItem(currentMedia);
             if (remoteUrl) {
               mediaBlobMapRef.current.set(remoteUrl, blobUrl);
-              const v = videoRef.current;
-              if (v) {
-                prevSrcRef.current = blobUrl || remoteUrl;
-                v.src = prevSrcRef.current;
-                v.load();
-                v.play().catch(() => {});
-              }
+              const v = videoARef.current;
+              if (v) { v.src = blobUrl || remoteUrl; v.load(); v.play().catch(() => {}); }
             }
           }, 2000);
         }}
       />
 
+      {/* Slot B — video persistente */}
+      <video
+        ref={videoBRef}
+        style={{ ...styles.slide, zIndex: activeSlot === 'B' ? 2 : 1 }}
+        muted
+        playsInline
+        preload="auto"
+        loop={activePlaylist.length === 1 && currentIsVideo}
+        onEnded={() => {
+          if (activeSlot !== 'B' || activePlaylist.length <= 1) return;
+          advanceSlide();
+        }}
+        onError={() => {
+          if (activeSlot !== 'B') return;
+          console.error('[Player] Error video slot B');
+          if (retryVideoRef.current) clearTimeout(retryVideoRef.current);
+          retryVideoRef.current = setTimeout(async () => {
+            if (!currentMedia) return;
+            const [remoteUrl, blobUrl] = await downloadItem(currentMedia);
+            if (remoteUrl) {
+              mediaBlobMapRef.current.set(remoteUrl, blobUrl);
+              const v = videoBRef.current;
+              if (v) { v.src = blobUrl || remoteUrl; v.load(); v.play().catch(() => {}); }
+            }
+          }, 2000);
+        }}
+      />
+
+      {/* Capa de imagen — z-index 3 se superpone encima de ambos videos */}
       {!currentIsVideo && currentPlaybackUrl && (
         <img
           key={`${currentMedia?.id}-${currentIndex}`}
           src={currentPlaybackUrl}
           alt=""
-          style={{ ...styles.slide, opacity: fade ? 1 : 0, transition: 'opacity 0.5s ease-in-out' }}
+          style={{ ...styles.slide, zIndex: 3, opacity: fade ? 1 : 0, transition: 'opacity 0.5s ease-in-out' }}
           onError={() => console.error('[Player] Error imagen:', currentPlaybackUrl)}
         />
       )}
