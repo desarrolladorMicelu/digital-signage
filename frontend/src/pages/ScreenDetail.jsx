@@ -346,7 +346,7 @@ export default function ScreenDetail() {
     return <div className="text-center py-12"><p className="text-gray-500">Pantalla no encontrada</p></div>;
   }
 
-  const playerUrl = `http://20.81.42.176/:5174/?device=${screen.device_id}`;
+  const playerUrl = `http://20.81.42.176:5174/?device=${screen.device_id}`;
 
   async function copyPlayerUrl() {
     try {
