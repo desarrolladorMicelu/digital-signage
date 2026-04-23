@@ -84,7 +84,7 @@ export default function MediaPage() {
         ) : (
           <div>
             <p className="text-gray-600 font-medium">Arrastra archivos aquí o haz clic para seleccionar</p>
-            <p className="text-sm text-gray-400 mt-1">JPG, PNG, GIF, WEBP, MP4 (max 50MB)</p>
+            <p className="text-sm text-gray-400 mt-1">Imágenes y videos (p. ej. MOV, MP4, WEBM…), máx. 50 MB</p>
           </div>
         )}
       </div>

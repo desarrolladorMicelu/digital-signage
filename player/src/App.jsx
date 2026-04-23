@@ -69,7 +69,7 @@ export default function App() {
   const isVideoMedia = useCallback((item) => {
     const mime = String(item?.mime_type || '').toLowerCase();
     if (mime.startsWith('video/')) return true;
-    return /\.(mp4|webm|ogg|mov|m4v)(\?|$)/.test(String(item?.url || '').toLowerCase());
+    return /\.(mp4|webm|ogg|ogv|mov|m4v|avi|mkv|mpeg|mpg|wmv|3gp|flv|ts)(\?|$)/i.test(String(item?.url || '').toLowerCase());
   }, []);
 
   const persistPlaylist = useCallback((items) => {
@@ -388,7 +388,7 @@ export default function App() {
       <div style={styles.waiting}>
         <div style={styles.waitingContent}>
           <div style={styles.logo}>📺</div>
-          <h1 style={styles.title}>Digital Signage Mi celu</h1>
+          <h1 style={styles.title}>Digital Signage Micelu</h1>
           <p style={styles.deviceId}>{DEVICE_ID}</p>
           <div style={styles.statusRow}>
             <span style={{ ...styles.statusDot, backgroundColor: connected ? '#22c55e' : '#ef4444' }} />

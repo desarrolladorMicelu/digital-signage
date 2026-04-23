@@ -17,16 +17,32 @@ const storage = multer.diskStorage({
   },
 });
 
+const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.avif']);
+const VIDEO_EXT = new Set([
+  '.mp4', '.webm', '.mov', '.m4v', '.avi', '.mkv', '.ogv', '.ogg',
+  '.mpeg', '.mpg', '.wmv', '.3gp', '.3g2', '.flv', '.f4v', '.ts', '.m2ts',
+  '.qt', '.asf', '.vob',
+]);
+
 const upload = multer({
   storage,
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const allowed = /\.(jpg|jpeg|png|gif|webp|bmp|mp4|webm)$/i;
-    if (allowed.test(path.extname(file.originalname))) {
+    const mime = String(file.mimetype || '').toLowerCase();
+    if (mime.startsWith('image/')) {
       cb(null, true);
-    } else {
-      cb(new Error('Solo se permiten imágenes y videos'));
+      return;
     }
+    if (mime.startsWith('video/')) {
+      cb(null, true);
+      return;
+    }
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (IMAGE_EXT.has(ext) || VIDEO_EXT.has(ext)) {
+      cb(null, true);
+      return;
+    }
+    cb(new Error('Solo se permiten imágenes y videos'));
   },
 });
 
